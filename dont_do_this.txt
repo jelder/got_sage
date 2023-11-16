@@ -1,3 +1,5 @@
+PostgreSQL (2023, November 16) Don't Do This https://wiki.postgresql.org/wiki/Don't_Do_This
+
 Don't use SQL_ASCII
 SQL_ASCII means "no conversions" for the purpose of all encoding conversion functions. That is to say, the original bytes are simply treated as being in the new encoding, subject to validity checks, without any regard for what they mean. Unless extreme care is taken, an SQL_ASCII database will usually end up storing a mixture of many different encodings with no way to recover the original characters reliably.
 
