@@ -1,0 +1,135 @@
+Don't use SQL_ASCII
+SQL_ASCII means "no conversions" for the purpose of all encoding conversion functions. That is to say, the original bytes are simply treated as being in the new encoding, subject to validity checks, without any regard for what they mean. Unless extreme care is taken, an SQL_ASCII database will usually end up storing a mixture of many different encodings with no way to recover the original characters reliably.
+
+Don't use rules. If you think you want to, use a trigger instead.
+
+Rules are incredibly powerful, but they don't do what they look like they do. They look like they're some conditional logic, but they actually rewrite a query to modify it or add additional queries to it.
+
+That means that all non-trivial rules are incorrect.
+
+
+Don't use table inheritance. If you think you want to, use foreign keys instead.
+
+Table inheritance was a part of a fad wherein the database was closely coupled to object-oriented code. It turned out that coupling things that closely didn't actually produce the desired results.
+
+Don't use NOT IN, or any combination of NOT and IN such as NOT (x IN (select…)).
+
+NOT IN behaves in unexpected ways if there is a null present:
+
+select * from foo where col not in (1,null); -- always returns 0 rows
+
+select * from foo where foo.col not in (select bar.x from bar); -- returns 0 rows if any value of bar.x is null
+This happens because col IN (1,null) returns TRUE if col=1, and NULL otherwise (i.e. it can never return FALSE). Since NOT (TRUE) is FALSE, but NOT (NULL) is still NULL, there is no way that NOT (col IN (1,null)) (which is the same thing as col NOT IN (1,null)) can return TRUE under any circumstances.
+
+2. Because of point 1 above, NOT IN (SELECT ...) does not optimize very well. In particular, the planner can't transform it into an anti-join, and so it becomes either a hashed Subplan or a plain Subplan. The hashed subplan is fast, but the planner only allows that plan for small result sets; the plain subplan is horrifically slow (in fact O(N²)). This means that the performance can look good in small-scale tests but then slow down by 5 or more orders of magnitude once a size threshold is crossed; you do not want this to happen.
+
+Alternative solution: In most cases, the NULL behavior of NOT IN (SELECT …) is not intentionally desired, and the query can be rewritten using NOT EXISTS (SELECT …):
+
+select * from foo where not exists (select from bar where foo.col = bar.x);
+When should you?
+NOT IN (list,of,values,...) is mostly safe unless you might have a null in the list (via a parameter or otherwise). So it's sometimes natural and even advisable to use it when excluding specific constant values from a query result.
+
+Don't use BETWEEN (especially with timestamps)
+BETWEEN uses a closed-interval comparison: the values of both ends of the specified range are included in the result.
+
+This is a particular problem with queries of the form
+
+SELECT * FROM blah WHERE timestampcol BETWEEN '2018-06-01' AND '2018-06-08'
+This will include results where the timestamp is exactly 2018-06-08 00:00:00.000000, but not timestamps later in that same day. So the query might seem to work, but as soon as you get an entry exactly on midnight, you'll end up double-counting it.
+
+Instead, do:
+
+SELECT * FROM blah WHERE timestampcol >= '2018-06-01' AND timestampcol < '2018-06-08'
+When should you?
+BETWEEN is safe for discrete quantities like integers or dates, as long as you remember that both ends of the range are included in the result. But it's a bad habit to get into.
+
+
+Don't use timestamp (without time zone)
+Don't use the timestamp type to store timestamps, use timestamptz (also known as timestamp with time zone) instead.
+
+timestamptz records a single moment in time. Despite what the name says it doesn't store a timestamp, just a point in time described as the number of microseconds since January 1st, 2000 in UTC. You can insert values in any timezone and it'll store the point in time that value describes. By default it will display times in your current timezone, but you can use at time zone to display it in other time zones.
+
+Because it stores a point in time it will do the right thing with arithmetic involving timestamps entered in different timezones - including between timestamps from the same location on different sides of a daylight savings time change.
+
+timestamp (also known as timestamp without time zone) doesn't do any of that, it just stores a date and time you give it. You can think of it being a picture of a calendar and a clock rather than a point in time. Without additional information - the timezone - you don't know what time it records. Because of that, arithmetic between timestamps from different locations or between timestamps from summer and winter may give the wrong answer.
+
+So if what you want to store is a point in time, rather than a picture of a clock, use timestamptz.
+
+Don't use timestamp (without time zone) to store UTC times. Use timestamp with time zone instead. Storing UTC values in a timestamp without time zone column is, unfortunately, a practice commonly inherited from other databases that lack usable timezone support.
+
+Because there is no way for the database to know that UTC is the intended timezone for the column values.
+
+This complicates many otherwise useful time calculations. For example, "last midnight in the timezone given by u.timezone" becomes this:
+
+date_trunc('day', now() AT TIME ZONE u.timezone) AT TIME ZONE u.timezone AT TIME ZONE 'UTC'
+And "the midnight prior to x.datecol in u.timezone" becomes this:
+
+date_trunc('day', x.datecol AT TIME ZONE 'UTC' AT TIME ZONE u.timezone)
+  AT TIME ZONE u.timezone AT TIME ZONE 'UTC'
+
+Don't use the timetz type. You probably want timestamptz instead.
+
+Even the manual tells you it's only implemented for SQL compliance.
+
+The type time with time zone is defined by the SQL standard, but the definition exhibits properties which lead to questionable usefulness. In most cases, a combination of date, time, timestamp without time zone, and timestamp with time zone should provide a complete range of date/time functionality required by any application.
+
+Don't use the CURRENT_TIME function. Use whichever of these is appropriate:
+
+CURRENT_TIMESTAMP or now() if you want a timestamp with time zone,
+LOCALTIMESTAMP if you want a timestamp without time zone,
+CURRENT_DATE if you want a date,
+LOCALTIME if you want a time
+It returns a value of type timetz, for which see the previous entry.
+
+Don't use a precision specification, especially not 0, for timestamp columns or casts to timestamp.
+
+Use date_trunc('second', blah) instead.
+
+Because it rounds off the fractional part rather than truncating it as everyone would expect. This can cause unexpected issues; consider that when you store now() into such a column, you might be storing a value half a second in the future.
+
+Don't use the type char(n). You probably want text.
+
+Any string you insert into a char(n) field will be padded with spaces to the declared width. That's probably not what you actually want.
+
+Values of type character are physically padded with spaces to the specified width n, and are stored and displayed that way. However, trailing spaces are treated as semantically insignificant and disregarded when comparing two values of type character. In collations where whitespace is significant, this behavior can produce unexpected results; for example SELECT 'a '::CHAR(2) collate "C" < E'a\n'::CHAR(2) returns true, even though C locale would consider a space to be greater than a newline. Trailing spaces are removed when converting a character value to one of the other string types. Note that trailing spaces are semantically significant in character varying and text values, and when using pattern matching, that is LIKE and regular expressions.
+
+The space-padding does waste space, but doesn't make operations on it any faster; in fact the reverse, thanks to the need to strip spaces in many contexts.
+
+It's important to note that from a storage point of view char(n) is not a fixed-width type. The actual number of bytes varies since characters may take more than one byte, and the stored values are therefore treated as variable-length anyway (even though the space padding is included in the storage).
+
+Don't use char(n) even for fixed-length identifiers
+Sometimes people respond to "don't use char(n)" with "but my values must always be exactly N characters long" (e.g. country codes, hashes, or identifiers from some other system). It is still a bad idea to use char(n) even in these cases.
+
+Use text, or a domain over text, with CHECK(length(VALUE)=3) or CHECK(VALUE ~ '^[[:alpha:]]{3}$') or similar.
+
+Because char(n) doesn't reject values that are too short, it just silently pads them with spaces. So there's no actual benefit over using text with a constraint that checks for the exact length. As a bonus, such a check can also verify that the value is in the correct format.
+
+Remember, there is no performance benefit whatsoever to using char(n) over varchar(n). In fact the reverse is true. One particular problem that comes up is that if you try and compare a char(n) field against a parameter where the driver has explicitly specified a type of text or varchar, you may be unexpectedly unable to use an index for the comparison. This can be hard to debug since it doesn't show up on manual queries.
+
+
+Don't use varchar(n) by default
+Don't use the type varchar(n) by default. Consider varchar (without the length limit) or text instead.
+
+varchar(n) is a variable width text field that will throw an error if you try and insert a string longer than n characters (not bytes) into it.
+
+varchar (without the (n)) or text are similar, but without the length limit. If you insert the same string into the three field types they will take up exactly the same amount of space, and you won't be able to measure any difference in performance.
+
+If you need to constrain the value in a field you probably need something more specific than a maximum length - maybe a minimum length too, or a limited set of characters - and a check constraint can do all of those things as well as a maximum string length.
+
+Always use text for storing text. Not varchar, char, or anything else. 
+
+The money data type isn't actually very good for storing monetary values. Numeric, or (rarely) integer may be better.
+
+It's a fixed-point type, implemented as a machine int, so arithmetic with it is fast. But it doesn't handle fractions of a cent (or equivalents in other currencies), it's rounding behaviour is probably not what you want.
+
+It doesn't store a currency with the value, rather assuming that all money columns contain the currency specified by the database's lc_monetary locale setting. If you change the lc_monetary setting for any reason, all money columns will contain the wrong value. That means that if you insert '$10.00' while lc_monetary is set to 'en_US.UTF-8' the value you retrieve may be '10,00 Lei' or '¥1,000' if lc_monetary is changed.
+
+Storing a value as a numeric, possibly with the currency being used in an adjacent column, might be better.
+
+For new applications, identity columns should be used instead of serial type.
+
+The serial types have some weird behaviors that make schema, dependency, and permission management unnecessarily cumbersome.
+
+Avoid using DISTINCT to fix joins. Use EXISTS instead. When you need to join to tables but only care about existence of rows and not any of the output from those tables, use EXISTS. Try to eliminate looking up values that you know are going to be the same on every row. 
+
+When optimizing a query or investigating a slow query, use https://explain.dalibo.com/ to visualize the query.
